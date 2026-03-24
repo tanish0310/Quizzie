@@ -1,0 +1,227 @@
+// @ts-nocheck
+
+import { NextResponse } from "next/server"
+import { getServerSession } from "next-auth/next"
+import { authOptions } from "@/lib/auth"
+import prisma from "@/lib/prisma"
+
+export async function GET(request: Request) {
+    try {
+        const session = await getServerSession(authOptions)
+
+        if (!session || !session.user.id) {
+            return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+        }
+
+        // Get URL parameters
+        const { searchParams } = new URL(request.url)
+        const type = searchParams.get("type") || "created" // created, assigned
+        const status = searchParams.get("status") // draft, active, completed, archived
+        const search = searchParams.get("search") || ""
+        const subject = searchParams.get("subject") || "all"
+
+        // Build the where clause for search and subject filtering
+        const searchFilter = search ? {
+            name: { contains: search, mode: 'insensitive' }
+        } : {}
+
+        const subjectFilter = subject !== "all" ? {
+            subject: {
+                equals: subject,
+                mode: 'insensitive'
+            }
+        } : {}
+
+        if (type === "created") {
+            // Get tests created by the user
+            const tests = await prisma.test.findMany({
+                where: {
+                    creatorId: session.user.id,
+                    ...(status ? { status } : {}),
+                    ...searchFilter,
+                    ...subjectFilter
+                },
+                include: {
+                    classroom: {
+                        select: {
+                            id: true,
+                            name: true,
+                        },
+                    },
+                    _count: {
+                        select: {
+                            questions: true,
+                            results: true,
+                        },
+                    },
+                    results: {
+                        where: {
+                            userId: session.user.id,
+                        },
+                        select: {
+                            id: true,
+                            score: true,
+                            completedAt: true,
+                        },
+                    },
+                },
+                orderBy: {
+                    updatedAt: "desc",
+                },
+            })
+
+            return NextResponse.json(tests)
+        } else if (type === "assigned") {
+            // Get tests assigned to the user (via classrooms they're members of)
+            const memberClassrooms = await prisma.classroomMember.findMany({
+                where: {
+                    userId: session.user.id,
+                },
+                select: {
+                    classroomId: true,
+                },
+            })
+
+            const classroomIds = memberClassrooms.map((member) => member.classroomId)
+
+            const tests = await prisma.test.findMany({
+                where: {
+                    classroomId: {
+                        in: classroomIds,
+                    },
+                    ...(status ? { status } : {}),
+                    ...searchFilter,
+                    ...subjectFilter
+                },
+                include: {
+                    classroom: {
+                        select: {
+                            id: true,
+                            name: true,
+                        },
+                    },
+                    creator: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                        },
+                    },
+                    _count: {
+                        select: {
+                            questions: true,
+                        },
+                    },
+                    results: {
+                        where: {
+                            userId: session.user.id,
+                        },
+                        select: {
+                            id: true,
+                            score: true,
+                            completedAt: true,
+                        },
+                    },
+                },
+                orderBy: {
+                    updatedAt: "desc",
+                },
+            })
+
+            return NextResponse.json(tests)
+        }
+
+        return NextResponse.json({ error: "Invalid type parameter" }, { status: 400 })
+    } catch (error) {
+        console.error("Error fetching tests:", error)
+        return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    }
+}
+
+export async function POST(request) {
+    try {
+        const body = await request.json();
+
+        const {testName, subject, topics, questionCount, questionTypes, content} = body
+
+        console.log(body)
+        let types = "";
+        if (questionTypes.multipleChoice) {
+            types += "multiple choice"
+        }
+
+        console.log(types)
+
+        if (questionTypes.trueFalse) {
+            if (types.length > 0) {
+                types += ", "
+            }
+            types += "true / false"
+        }
+
+        console.log(types)
+
+
+        if (questionTypes.shortAnswer) {
+            if (types.length > 0) {
+                types += ", "
+            }
+            types += "short answer"
+        }
+
+        console.log(types)
+
+        console.log("hit3")
+
+        if (!testName || !subject || !topics || !questionCount || !types || !content) {
+            return new Response(JSON.stringify({ success: false, error: "Missing required fields" }), {
+                status: 400,
+                headers: { "Content-Type": "application/json" },
+            });
+        }
+
+        console.log("hit4")
+        try {
+            const prompt = `Generate ${questionCount} questions for a test named "${testName}" on the subject "${subject}" covering topics ${topics}. 
+    Use the following content as reference:
+    """
+    ${content}
+    """
+    The questions should be of types: ${types}.
+    Format each question as:
+    {
+      "text": "The question text",
+      "type": "multiple-choice | true-false | short-answer",
+      "options": ["option 1", "option 2", "option 3", "option 4"] (only for multiple-choice or true-false),
+      "answer": "Correct answer" (give the 0-index position of the correct option for multiple choice / true false, give an exemplar sample answer for short answer question),
+      "points": 1 (or allocated marks for short-answer based on context)
+    }
+    The overall format MUST be {"questions": [{question1}, {question2}]}
+    you MUST just answer with the json data beginning with { and ending with }`;
+
+            const { GoogleGenerativeAI } = await import("@google/generative-ai");
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash",
+    systemInstruction: "You are an AI that generates test questions in JSON format.",
+    generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.7,
+    },
+});
+
+const result = await model.generateContent(prompt);
+const text = result.response.text();
+console.log(text);
+return new Response(text, {
+  status: 200,
+  headers: { "Content-Type": "application/json" }
+});
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ error: 'Internal Server Error' });
+        }
+    } catch (error) {
+
+    }
+
+}
