@@ -161,28 +161,13 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
     setIsSubmitting(true)
 
     try {
-        // Flush all answers to DB before submitting.
-        // Short answers are excluded here since submitTest grades them via Gemini.
-        // Multiple choice and true/false saves are instant (no AI calls).
-        const nonShortAnswerQuestions = test.questions
-            .filter(q => q.type !== "short-answer")
-            .map(q => q.id)
-
+        // Flush all current answers in parallel.
+        // saveAnswer is now instant for all types — Gemini grading
+        // only happens inside submitTest, not here.
         await Promise.all(
-            Object.entries(answers)
-                .filter(([questionId]) => nonShortAnswerQuestions.includes(questionId))
-                .map(([questionId, answer]) => saveAnswer(attemptId!, questionId, answer))
-        )
-
-        // Also flush short answers (saved as text only, graded in submitTest)
-        const shortAnswerQuestions = test.questions
-            .filter(q => q.type === "short-answer")
-            .map(q => q.id)
-
-        await Promise.all(
-            Object.entries(answers)
-                .filter(([questionId]) => shortAnswerQuestions.includes(questionId))
-                .map(([questionId, answer]) => saveAnswer(attemptId!, questionId, answer))
+            Object.entries(answers).map(([questionId, answer]) =>
+                saveAnswer(attemptId!, questionId, answer)
+            )
         )
 
         const result = await submitTest(attemptId, test.timeLimit * 60 - timeRemaining)
