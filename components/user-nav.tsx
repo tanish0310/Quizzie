@@ -19,9 +19,9 @@ export function UserNav() {
   const { data: session } = useSession()
   const isLoggedIn = !!session?.user
 
-  const handleLogout = async () => {
-    await signOut({ callbackUrl: "/login" })
-  }
+  const handleLogout = () => {
+  signOut({ callbackUrl: "/login" })
+}
 
   if (!isLoggedIn) {
     return (
@@ -78,10 +78,15 @@ export function UserNav() {
           </DropdownMenuItem>
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={handleLogout}>
-          <LogOut className="mr-2 h-4 w-4" />
-          <span>Log out</span>
-        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
+  <button
+    className="w-full flex items-center cursor-pointer"
+    onClick={handleLogout}
+  >
+    <LogOut className="mr-2 h-4 w-4" />
+    <span>Log out</span>
+  </button>
+</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )
