@@ -250,9 +250,7 @@ export async function submitTest(attemptId: string, timeSpent: number) {
             data: { score: percentageScore, completedAt: new Date(), timeSpent },
         })
 
-        revalidatePath(`/test-results/${attempt.testId}`)
-        revalidatePath("/myspace")
-        revalidatePath("/dashboard")
+        
 
         return { success: true, message: "Test submitted successfully" }
     } catch (error) {
