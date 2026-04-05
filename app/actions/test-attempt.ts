@@ -32,6 +32,8 @@ export async function startTestAttempt(testId: string, userId: string) {
     }
 }
 
+// saveAnswer handles multiple-choice and true-false instantly.
+// Short answer answers are saved as-is (score=0) and graded in bulk at submit time.
 export async function saveAnswer(attemptId: string, questionId: string, answer: string) {
     try {
         const attempt = await prisma.testResult.findUnique({
@@ -68,43 +70,9 @@ export async function saveAnswer(attemptId: string, questionId: string, answer: 
                 break
 
             case "short-answer":
-                // Use Gemini to grade short answer questions
-                try {
-                    const { GoogleGenerativeAI } = await import("@google/generative-ai")
-                    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
-                    const model = genAI.getGenerativeModel({
-                        model: "gemini-2.5-flash",
-                        systemInstruction: "You are a strict but fair exam grader. Respond only with valid JSON.",
-                        generationConfig: {
-                            responseMimeType: "application/json",
-                            temperature: 0.1,
-                        },
-                    })
-
-                    const gradingPrompt = `Grade this short answer response.
-
-Question: "${question.text}"
-Sample correct answer: "${question.answer}"
-Student's answer: "${answer}"
-
-Respond with JSON in this exact format:
-{
-  "isCorrect": true or false,
-  "partialScore": a number between 0 and 1 representing how correct the answer is (0 = completely wrong, 0.5 = half correct, 1 = fully correct)
-}
-
-Be generous — if the student demonstrates understanding of the core concept even with different wording, mark it as correct.`
-
-                    const result = await model.generateContent(gradingPrompt)
-                    const gradingResult = JSON.parse(result.response.text())
-
-                    isCorrect = gradingResult.isCorrect === true
-                    score = Math.round((gradingResult.partialScore ?? (isCorrect ? 1 : 0)) * question.points)
-                } catch (gradingError) {
-                    console.error("AI grading failed, falling back to exact match:", gradingError)
-                    isCorrect = answer.trim().toLowerCase() === question.answer.trim().toLowerCase()
-                    score = isCorrect ? question.points : 0
-                }
+                // Saved immediately with score=0, graded properly at submit time
+                isCorrect = false
+                score = 0
                 break
 
             default:
@@ -139,6 +107,47 @@ Be generous — if the student demonstrates understanding of the core concept ev
     }
 }
 
+// Grade a single short answer question using Gemini
+async function gradeShortAnswer(answer: string, question: any): Promise<{ isCorrect: boolean; score: number }> {
+    try {
+        const { GoogleGenerativeAI } = await import("@google/generative-ai")
+        const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+        const model = genAI.getGenerativeModel({
+            model: "gemini-2.5-flash",
+            systemInstruction: "You are a strict but fair exam grader. Respond only with valid JSON.",
+            generationConfig: {
+                responseMimeType: "application/json",
+                temperature: 0.1,
+            },
+        })
+
+        const gradingPrompt = `Grade this short answer response.
+
+Question: "${question.text}"
+Sample correct answer: "${question.answer}"
+Student's answer: "${answer}"
+
+Respond with JSON in this exact format:
+{
+  "isCorrect": true or false,
+  "partialScore": a number between 0 and 1 (0 = completely wrong, 0.5 = half correct, 1 = fully correct)
+}
+
+Be generous — if the student demonstrates understanding of the core concept even with different wording, mark it as correct.`
+
+        const result = await model.generateContent(gradingPrompt)
+        const gradingResult = JSON.parse(result.response.text())
+
+        const isCorrect = gradingResult.isCorrect === true
+        const score = Math.round((gradingResult.partialScore ?? (isCorrect ? 1 : 0)) * question.points)
+        return { isCorrect, score }
+    } catch (error) {
+        console.error("AI grading failed, falling back to exact match:", error)
+        const isCorrect = answer.trim().toLowerCase() === question.answer.trim().toLowerCase()
+        return { isCorrect, score: isCorrect ? question.points : 0 }
+    }
+}
+
 export async function submitTest(attemptId: string, timeSpent: number) {
     try {
         const attempt = await prisma.testResult.findUnique({
@@ -152,8 +161,40 @@ export async function submitTest(attemptId: string, timeSpent: number) {
         if (!attempt) return { success: false, message: "Test attempt not found" }
         if (attempt.completedAt) return { success: false, message: "Test has already been submitted" }
 
+        // Find all short answer answers that need Gemini grading
+        const shortAnswers = attempt.answers.filter(a => {
+            const question = attempt.test.questions.find(q => q.id === a.questionId)
+            return question?.type === "short-answer"
+        })
+
+        // Grade ALL short answers in parallel — not sequentially
+        if (shortAnswers.length > 0) {
+            const gradingResults = await Promise.all(
+                shortAnswers.map(async (answer) => {
+                    const question = attempt.test.questions.find(q => q.id === answer.questionId)
+                    const { isCorrect, score } = await gradeShortAnswer(answer.text, question)
+                    return { answerId: answer.id, isCorrect, score }
+                })
+            )
+
+            // Write all updated scores in parallel
+            await Promise.all(
+                gradingResults.map(({ answerId, isCorrect, score }) =>
+                    prisma.answer.update({
+                        where: { id: answerId },
+                        data: { isCorrect, score },
+                    })
+                )
+            )
+        }
+
+        // Fetch updated answers for final score calculation
+        const updatedAnswers = await prisma.answer.findMany({
+            where: { testResultId: attemptId },
+        })
+
         const totalPossibleScore = attempt.test.questions.reduce((sum, q) => sum + q.points, 0)
-        const earnedScore = attempt.answers.reduce((sum, a) => sum + a.score, 0)
+        const earnedScore = updatedAnswers.reduce((sum, a) => sum + (a.score ?? 0), 0)
         const percentageScore = totalPossibleScore > 0 ? (earnedScore / totalPossibleScore) * 100 : 0
 
         await prisma.testResult.update({

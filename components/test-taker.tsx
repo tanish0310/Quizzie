@@ -161,10 +161,7 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
         setIsSubmitting(true)
 
         try {
-            // Save any unsaved answers first
-            await Promise.all(
-                Object.entries(answers).map(([questionId, answer]) => saveAnswer(attemptId!, questionId, answer)),
-            )
+            
 
             // Submit the test
             const result = await submitTest(attemptId, test.timeLimit * 60 - timeRemaining)
