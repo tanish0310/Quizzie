@@ -32,8 +32,7 @@ export async function startTestAttempt(testId: string, userId: string) {
     }
 }
 
-// saveAnswer handles multiple-choice and true-false instantly.
-// Short answer answers are saved as-is (score=0) and graded in bulk at submit time.
+// Used by auto-save during the test — saves one answer at a time
 export async function saveAnswer(attemptId: string, questionId: string, answer: string) {
     try {
         const attempt = await prisma.testResult.findUnique({
@@ -55,7 +54,6 @@ export async function saveAnswer(attemptId: string, questionId: string, answer: 
                 isCorrect = answer.trim() === question.answer.trim()
                 score = isCorrect ? question.points : 0
                 break
-
             case "true-false":
                 isCorrect = false
                 score = 0
@@ -68,14 +66,10 @@ export async function saveAnswer(attemptId: string, questionId: string, answer: 
                     isCorrect = true
                 }
                 break
-
             case "short-answer":
-                // Saved immediately with score=0, graded properly at submit time
+                // Saved immediately, graded at submit time
                 isCorrect = false
                 score = 0
-                break
-
-            default:
                 break
         }
 
@@ -107,7 +101,64 @@ export async function saveAnswer(attemptId: string, questionId: string, answer: 
     }
 }
 
-// Grade a single short answer question using Gemini
+// Called once at submit time — bulk upserts all answers in a single DB transaction.
+// Much faster than calling saveAnswer N times.
+export async function flushAnswers(
+    attemptId: string,
+    answers: Record<string, string>,
+    questions: { id: string; type: string; answer: string; points: number }[]
+) {
+    try {
+        const attempt = await prisma.testResult.findUnique({
+            where: { id: attemptId },
+        })
+
+        if (!attempt || attempt.completedAt) return { success: false }
+
+        const questionMap = new Map(questions.map(q => [q.id, q]))
+
+        // Run all upserts in a single transaction
+        await prisma.$transaction(
+            Object.entries(answers).map(([questionId, answerText]) => {
+                const question = questionMap.get(questionId)
+                if (!question) return null
+
+                let isCorrect = false
+                let score = 0
+
+                if (question.type === "multiple-choice") {
+                    isCorrect = answerText.trim() === question.answer.trim()
+                    score = isCorrect ? question.points : 0
+                } else if (question.type === "true-false") {
+                    if ((question.answer === "False" || question.answer === "1") && answerText === "1") {
+                        isCorrect = true; score = question.points
+                    } else if ((question.answer === "True" || question.answer === "0") && answerText === "0") {
+                        isCorrect = true; score = question.points
+                    }
+                }
+                // short-answer: score=0, graded later in submitTest
+
+                return prisma.answer.upsert({
+                    where: { testResultId_questionId: { testResultId: attemptId, questionId } },
+                    update: { text: answerText, isCorrect, score },
+                    create: {
+                        text: answerText,
+                        isCorrect,
+                        score,
+                        testResultId: attemptId,
+                        questionId,
+                    },
+                })
+            }).filter(Boolean)
+        )
+
+        return { success: true }
+    } catch (error) {
+        console.error("Error flushing answers:", error)
+        return { success: false }
+    }
+}
+
 async function gradeShortAnswer(answer: string, question: any): Promise<{ isCorrect: boolean; score: number }> {
     try {
         const { GoogleGenerativeAI } = await import("@google/generative-ai")
@@ -137,7 +188,6 @@ Be generous — if the student demonstrates understanding of the core concept ev
 
         const result = await model.generateContent(gradingPrompt)
         const gradingResult = JSON.parse(result.response.text())
-
         const isCorrect = gradingResult.isCorrect === true
         const score = Math.round((gradingResult.partialScore ?? (isCorrect ? 1 : 0)) * question.points)
         return { isCorrect, score }
@@ -161,13 +211,12 @@ export async function submitTest(attemptId: string, timeSpent: number) {
         if (!attempt) return { success: false, message: "Test attempt not found" }
         if (attempt.completedAt) return { success: false, message: "Test has already been submitted" }
 
-        // Find all short answer answers that need Gemini grading
+        // Grade all short answers in parallel
         const shortAnswers = attempt.answers.filter(a => {
-            const question = attempt.test.questions.find(q => q.id === a.questionId)
-            return question?.type === "short-answer"
+            const q = attempt.test.questions.find(q => q.id === a.questionId)
+            return q?.type === "short-answer"
         })
 
-        // Grade ALL short answers in parallel — not sequentially
         if (shortAnswers.length > 0) {
             const gradingResults = await Promise.all(
                 shortAnswers.map(async (answer) => {
@@ -177,7 +226,6 @@ export async function submitTest(attemptId: string, timeSpent: number) {
                 })
             )
 
-            // Write all updated scores in parallel
             await Promise.all(
                 gradingResults.map(({ answerId, isCorrect, score }) =>
                     prisma.answer.update({
@@ -188,7 +236,7 @@ export async function submitTest(attemptId: string, timeSpent: number) {
             )
         }
 
-        // Fetch updated answers for final score calculation
+        // Fetch updated answers for final score
         const updatedAnswers = await prisma.answer.findMany({
             where: { testResultId: attemptId },
         })
@@ -199,11 +247,7 @@ export async function submitTest(attemptId: string, timeSpent: number) {
 
         await prisma.testResult.update({
             where: { id: attemptId },
-            data: {
-                score: percentageScore,
-                completedAt: new Date(),
-                timeSpent,
-            },
+            data: { score: percentageScore, completedAt: new Date(), timeSpent },
         })
 
         revalidatePath(`/test-results/${attempt.testId}`)

@@ -12,7 +12,9 @@ import { Progress } from "@/components/ui/progress"
 import { useToast } from "@/components/ui/use-toast"
 import { useRouter } from "next/navigation"
 import { Clock, ChevronLeft, ChevronRight, Save, CheckCircle, AlertTriangle } from "lucide-react"
-import { startTestAttempt, saveAnswer, submitTest } from "@/app/actions/test-attempt"
+
+// Add flushAnswers to the import at the top
+import { startTestAttempt, saveAnswer, submitTest, flushAnswers } from "@/app/actions/test-attempt"
 
 interface TestTakerProps {
     test: any
@@ -161,13 +163,16 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
     setIsSubmitting(true)
 
     try {
-        // Flush all current answers in parallel.
-        // saveAnswer is now instant for all types — Gemini grading
-        // only happens inside submitTest, not here.
-        await Promise.all(
-            Object.entries(answers).map(([questionId, answer]) =>
-                saveAnswer(attemptId!, questionId, answer)
-            )
+        // Single bulk DB transaction — much faster than N saveAnswer calls
+        await flushAnswers(
+            attemptId,
+            answers,
+            test.questions.map(q => ({
+                id: q.id,
+                type: q.type,
+                answer: q.answer,
+                points: q.points,
+            }))
         )
 
         const result = await submitTest(attemptId, test.timeLimit * 60 - timeRemaining)
