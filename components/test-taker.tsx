@@ -156,40 +156,61 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
     }
 
     const handleSubmitTest = async (isAutoSubmit = false) => {
-        if (!attemptId) return
+    if (!attemptId) return
 
-        setIsSubmitting(true)
+    setIsSubmitting(true)
 
-        try {
-            
+    try {
+        // Flush all answers to DB before submitting.
+        // Short answers are excluded here since submitTest grades them via Gemini.
+        // Multiple choice and true/false saves are instant (no AI calls).
+        const nonShortAnswerQuestions = test.questions
+            .filter(q => q.type !== "short-answer")
+            .map(q => q.id)
 
-            // Submit the test
-            const result = await submitTest(attemptId, test.timeLimit * 60 - timeRemaining)
+        await Promise.all(
+            Object.entries(answers)
+                .filter(([questionId]) => nonShortAnswerQuestions.includes(questionId))
+                .map(([questionId, answer]) => saveAnswer(attemptId!, questionId, answer))
+        )
 
-            if (result.success) {
-                toast({
-                    title: isAutoSubmit ? "Time's up!" : "Test submitted",
-                    description: "Your test has been submitted successfully.",
-                })
-                router.push(`/test-results/${test.id}`)
-            } else {
-                toast({
-                    title: "Error",
-                    description: result.message || "Failed to submit test",
-                    variant: "destructive",
-                })
-                setIsSubmitting(false)
-            }
-        } catch (error) {
-            console.error("Failed to submit test:", error)
+        // Also flush short answers (saved as text only, graded in submitTest)
+        const shortAnswerQuestions = test.questions
+            .filter(q => q.type === "short-answer")
+            .map(q => q.id)
+
+        await Promise.all(
+            Object.entries(answers)
+                .filter(([questionId]) => shortAnswerQuestions.includes(questionId))
+                .map(([questionId, answer]) => saveAnswer(attemptId!, questionId, answer))
+        )
+
+        const result = await submitTest(attemptId, test.timeLimit * 60 - timeRemaining)
+
+        if (result.success) {
+            toast({
+                title: isAutoSubmit ? "Time's up!" : "Test submitted",
+                description: "Your test has been submitted successfully.",
+            })
+            router.push(`/test-results/${test.id}`)
+        } else {
             toast({
                 title: "Error",
-                description: "Failed to submit test. Please try again.",
+                description: result.message || "Failed to submit test",
                 variant: "destructive",
             })
             setIsSubmitting(false)
         }
+    } catch (error) {
+        console.error("Failed to submit test:", error)
+        toast({
+            title: "Error",
+            description: "Failed to submit test. Please try again.",
+            variant: "destructive",
+        })
+        setIsSubmitting(false)
     }
+}
 
     const currentQuestionData = test.questions[currentQuestion]
     const progress = ((currentQuestion + 1) / test.questions.length) * 100
