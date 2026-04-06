@@ -44,7 +44,7 @@ In 2-3 sentences:
       systemInstruction: "You are an expert tutor. Give concise, student-friendly explanations that focus on understanding, not just the right answer.",
       generationConfig: {
         temperature: 0.7,
-        maxOutputTokens: 200,
+        maxOutputTokens: 1000,
       },
     })
 
