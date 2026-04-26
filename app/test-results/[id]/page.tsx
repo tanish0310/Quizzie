@@ -86,4 +86,3 @@ export default async function TestResultsPage({ params }) {
 
   return <TestResultsView test={test} testResult={testResult} />
 }
-

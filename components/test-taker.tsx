@@ -11,10 +11,9 @@ import { Separator } from "@/components/ui/separator"
 import { Progress } from "@/components/ui/progress"
 import { useToast } from "@/components/ui/use-toast"
 import { useRouter } from "next/navigation"
-import { Clock, ChevronLeft, ChevronRight, Save, CheckCircle, AlertTriangle } from "lucide-react"
+import { Clock, ChevronLeft, ChevronRight, Save, CheckCircle, AlertTriangle, Loader2 } from "lucide-react"
 
-// Add flushAnswers to the import at the top
-import { startTestAttempt, saveAnswer, submitTest, flushAnswers } from "@/app/actions/test-attempt"
+import { startTestAttempt, submitTest, flushAnswers } from "@/app/actions/test-attempt"
 
 interface TestTakerProps {
     test: any
@@ -108,7 +107,7 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
         return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`
     }
 
-    // Auto-save answers
+    // Auto-save answers: Only saves drafts, does not trigger grading
     useEffect(() => {
         if (autoSaveTimeoutRef.current) {
             clearTimeout(autoSaveTimeoutRef.current)
@@ -118,8 +117,11 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
             autoSaveTimeoutRef.current = setTimeout(async () => {
                 setAutoSaveStatus("saving")
                 try {
-                    await Promise.all(
-                        Object.entries(answers).map(([questionId, answer]) => saveAnswer(attemptId!, questionId, answer)),
+                    // Send 1 request instead of N requests, only sending question IDs
+                    await flushAnswers(
+                        attemptId,
+                        answers,
+                        test.questions.map((q: any) => ({ id: q.id }))
                     )
                     setAutoSaveStatus("saved")
                     setTimeout(() => setAutoSaveStatus("idle"), 2000)
@@ -135,7 +137,7 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
                 clearTimeout(autoSaveTimeoutRef.current)
             }
         }
-    }, [answers, attemptId])
+    }, [answers, attemptId, test.questions])
 
     const handleAnswerChange = (questionId: string, value: string) => {
         setAnswers((prev) => ({
@@ -158,49 +160,42 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
     }
 
     const handleSubmitTest = async (isAutoSubmit = false) => {
-    if (!attemptId) return
+        if (!attemptId) return
 
-    setIsSubmitting(true)
+        setIsSubmitting(true)
 
-    try {
-        // Single bulk DB transaction — much faster than N saveAnswer calls
-        await flushAnswers(
-            attemptId,
-            answers,
-            test.questions.map(q => ({
-                id: q.id,
-                type: q.type,
-                answer: q.answer,
-                points: q.points,
-            }))
-        )
+        try {
+            // Pass answers dict directly to server to bypass database draft-fetching
+            const result = await submitTest(
+                attemptId, 
+                answers, 
+                test.timeLimit * 60 - timeRemaining
+            )
 
-        const result = await submitTest(attemptId, test.timeLimit * 60 - timeRemaining)
-
-        if (result.success) {
-            toast({
-                title: isAutoSubmit ? "Time's up!" : "Test submitted",
-                description: "Your test has been submitted successfully.",
-            })
-            router.push(`/test-results/${test.id}`)
-        } else {
+            if (result.success) {
+                toast({
+                    title: isAutoSubmit ? "Time's up!" : "Test submitted",
+                    description: "Your test has been successfully graded.",
+                })
+                router.push(`/test-results/${test.id}`)
+            } else {
+                toast({
+                    title: "Error",
+                    description: result.message || "Failed to submit test",
+                    variant: "destructive",
+                })
+                setIsSubmitting(false)
+            }
+        } catch (error) {
+            console.error("Failed to submit test:", error)
             toast({
                 title: "Error",
-                description: result.message || "Failed to submit test",
+                description: "Failed to submit test. Please try again.",
                 variant: "destructive",
             })
             setIsSubmitting(false)
         }
-    } catch (error) {
-        console.error("Failed to submit test:", error)
-        toast({
-            title: "Error",
-            description: "Failed to submit test. Please try again.",
-            variant: "destructive",
-        })
-        setIsSubmitting(false)
     }
-}
 
     const currentQuestionData = test.questions[currentQuestion]
     const progress = ((currentQuestion + 1) / test.questions.length) * 100
@@ -300,8 +295,8 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
                                 <div className="flex items-center text-muted-foreground">
                                     <Clock className="mr-2 h-4 w-4" />
                                     <span className={timeRemaining < 300 ? "text-red-500 font-bold" : ""}>
-                    {formatTimeRemaining()} remaining
-                  </span>
+                                        {formatTimeRemaining()} remaining
+                                    </span>
                                 </div>
                             </div>
                             <Progress value={progress} className="h-2" />
@@ -336,7 +331,10 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
                                     className="bg-green-600 hover:bg-green-700"
                                 >
                                     {isSubmitting ? (
-                                        <>Submitting...</>
+                                        <>
+                                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                            Submitting...
+                                        </>
                                     ) : (
                                         <>
                                             Submit Test
@@ -402,9 +400,9 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
 
                             <Separator className="my-4" />
 
-                            <Button className="w-full" variant="outline" onClick={() => handleSubmitTest()}>
+                            <Button className="w-full" variant="outline" onClick={() => handleSubmitTest()} disabled={isSubmitting}>
                                 <Save className="mr-2 h-4 w-4" />
-                                Submit Test
+                                {isSubmitting ? "Submitting..." : "Submit Test"}
                             </Button>
                         </CardContent>
                     </Card>
@@ -413,4 +411,3 @@ export function TestTaker({ test, existingAttempt, userId }: TestTakerProps) {
         </div>
     )
 }
-
